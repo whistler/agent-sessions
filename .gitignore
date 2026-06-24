@@ -3,16 +3,10 @@
 **/*.rs.bk
 Cargo.lock        # library: keep unlocked (remove this line for the binary crate)
 
-# Python (PyO3 / maturin)
-__pycache__/
-*.py[cod]
-.venv/
-*.egg-info/
-dist/
-build/
-*.so
-
 # Local index / caches / artifacts
 *.db
+*.db-shm
+*.db-wal
 .agent-sessions/
+.fastembed_cache/
 .DS_Store
