@@ -1,6 +1,7 @@
-use agent_sessions::{Config, Harness, ListQuery, SessionIndex};
+use agent_sessions::{Config, Harness, ListQuery, SessionIndex, SyncEvent};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
 #[derive(Parser)]
 #[command(
@@ -198,12 +199,61 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Sync => {
-            let report = index.sync()?;
-            print_json_or_text(cli.json, &report, |report| {
-                format!(
-                    "indexed {} conversations, {} chunks",
-                    report.conversations_indexed, report.chunks_added
+            let report = if cli.json {
+                // --json: no progress bar, final report to stdout only
+                index.sync()?
+            } else {
+                let mp = MultiProgress::new();
+                let bar_style = ProgressStyle::with_template(
+                    "{prefix:.bold.cyan}: [{bar:35.cyan/blue}] {pos}/{len} {msg}",
                 )
+                .unwrap()
+                .progress_chars("█▓░");
+
+                let mut pb: Option<ProgressBar> = None;
+
+                let report = index.sync_with_progress(|event| match event {
+                    SyncEvent::HarnessSkip { harness } => {
+                        eprintln!("{harness}: not present, skipping");
+                    }
+                    SyncEvent::HarnessStart { harness, session_count } => {
+                        let bar = mp.add(ProgressBar::new(*session_count as u64));
+                        bar.set_style(bar_style.clone());
+                        bar.set_prefix(harness.clone());
+                        pb = Some(bar);
+                    }
+                    SyncEvent::ConversationSkip { .. } => {
+                        if let Some(b) = &pb {
+                            b.inc(1);
+                        }
+                    }
+                    SyncEvent::ConversationIndexed { id, chunks, .. } => {
+                        if let Some(b) = &pb {
+                            b.set_message(format!("{id} ({chunks} chunks)"));
+                            b.inc(1);
+                        }
+                    }
+                    SyncEvent::HarnessDone { harness, conversations, chunks } => {
+                        if let Some(b) = pb.take() {
+                            b.finish_with_message(format!(
+                                "done — {conversations} conversations, {chunks} chunks"
+                            ));
+                        }
+                        let _ = (harness, conversations, chunks);
+                    }
+                    SyncEvent::Error { harness, message } => {
+                        if let Some(b) = &pb {
+                            b.println(format!("{harness}: error — {message}"));
+                        } else {
+                            eprintln!("{harness}: error — {message}");
+                        }
+                    }
+                })?;
+                report
+            };
+
+            print_json_or_text(cli.json, &report, |r| {
+                format!("synced {} conversations, {} chunks", r.conversations_indexed, r.chunks_added)
             })?;
         }
         Commands::Search { query, limit, harness: _ } => {

@@ -11,7 +11,8 @@ pub use connector::HarnessConnector;
 pub use embedder::{Embedder, FastEmbedder, HashEmbedder, default_embedder};
 pub use error::{AgentSessionsError, Result};
 pub use models::{
-    Conversation, ConversationRef, GrepHit, Harness, Locator, Message, Role, SearchHit, SyncReport,
+    Conversation, ConversationRef, GrepHit, Harness, Locator, Message, Role, SearchHit,
+    SyncEvent, SyncReport,
 };
 pub use store::{ChunkVector, Filter, Meta, StoredChunk, VectorStore};
 
@@ -95,6 +96,10 @@ impl SessionIndex {
     }
 
     pub fn sync(&mut self) -> Result<SyncReport> {
+        self.sync_with_progress(|_| {})
+    }
+
+    pub fn sync_with_progress(&mut self, mut on_event: impl FnMut(&SyncEvent)) -> Result<SyncReport> {
         let mut report = SyncReport {
             conversations_indexed: 0,
             chunks_added: 0,
@@ -103,24 +108,56 @@ impl SessionIndex {
         };
 
         for connector in &self.connectors {
+            let harness = connector.id().to_string();
+
+            if !connector.is_present() {
+                on_event(&SyncEvent::HarnessSkip { harness: harness.clone() });
+                continue;
+            }
+
             let discovered = match connector.discover(None) {
-                Ok(conversations) => conversations,
+                Ok(refs) => refs,
                 Err(err) => {
-                    report
-                        .harness_errors
-                        .insert(connector.id().to_string(), err.to_string());
+                    let msg = err.to_string();
+                    on_event(&SyncEvent::Error { harness: harness.clone(), message: msg.clone() });
+                    report.harness_errors.insert(harness, msg);
                     continue;
                 }
             };
 
-            let mut harness_indexed = false;
+            on_event(&SyncEvent::HarnessStart {
+                harness: harness.clone(),
+                session_count: discovered.len(),
+            });
+
+            let mut harness_conversations = 0usize;
+            let mut harness_chunks = 0usize;
+
             for conv_ref in discovered {
+                // Skip already-indexed conversations
+                match self.store.has_conversation(&conv_ref.id) {
+                    Ok(true) => {
+                        on_event(&SyncEvent::ConversationSkip {
+                            harness: harness.clone(),
+                            id: conv_ref.id.clone(),
+                        });
+                        continue;
+                    }
+                    Err(err) => {
+                        let msg = err.to_string();
+                        on_event(&SyncEvent::Error { harness: harness.clone(), message: msg.clone() });
+                        report.harness_errors.insert(harness.clone(), msg);
+                        continue;
+                    }
+                    Ok(false) => {}
+                }
+
                 let (conversation, messages) = match connector.parse(&conv_ref) {
                     Ok(parsed) => parsed,
                     Err(err) => {
-                        report
-                            .harness_errors
-                            .insert(connector.id().to_string(), err.to_string());
+                        let msg = err.to_string();
+                        on_event(&SyncEvent::Error { harness: harness.clone(), message: msg.clone() });
+                        report.harness_errors.insert(harness.clone(), msg);
                         continue;
                     }
                 };
@@ -133,23 +170,20 @@ impl SessionIndex {
                     let model = message.model.clone();
                     let timestamp = message
                         .timestamp
-                        .clone()
-                        .or(conversation.started_at.clone())
+                        .or(conversation.started_at)
                         .unwrap_or_else(utc_now);
 
                     let message_text = match connector.read(&locator) {
                         Ok(text) => text,
                         Err(err) => {
-                            report
-                                .harness_errors
-                                .insert(connector.id().to_string(), err.to_string());
+                            let msg = err.to_string();
+                            on_event(&SyncEvent::Error { harness: harness.clone(), message: msg.clone() });
+                            report.harness_errors.insert(harness.clone(), msg);
                             continue;
                         }
                     };
 
-                    let chunks = self.chunker.chunk(&message_text);
-
-                    for (chunk_ordinal, chunk_text) in chunks.into_iter().enumerate() {
+                    for (chunk_ordinal, chunk_text) in self.chunker.chunk(&message_text).into_iter().enumerate() {
                         let mut chunk_locator = locator.clone();
                         chunk_locator.chunk_ordinal = chunk_ordinal;
                         chunk_texts.push(chunk_text);
@@ -172,20 +206,34 @@ impl SessionIndex {
                     self.embedder.embed_batch(&chunk_refs)?
                 };
 
-                for (record, vector) in chunk_records.iter_mut().zip(vectors.into_iter()) {
+                for (record, vector) in chunk_records.iter_mut().zip(vectors) {
                     record.vector = vector;
                 }
 
+                let n_chunks = chunk_records.len();
                 self.store.upsert_conversation(&conversation)?;
                 self.store.upsert_chunks(&conversation.id, &chunk_records)?;
 
+                on_event(&SyncEvent::ConversationIndexed {
+                    harness: harness.clone(),
+                    id: conversation.id.clone(),
+                    chunks: n_chunks,
+                });
+
                 report.conversations_indexed += 1;
-                report.chunks_added += chunk_records.len();
-                harness_indexed = true;
+                report.chunks_added += n_chunks;
+                harness_conversations += 1;
+                harness_chunks += n_chunks;
             }
 
-            if harness_indexed {
-                report.harnesses_synced.push(connector.id().to_string());
+            on_event(&SyncEvent::HarnessDone {
+                harness: harness.clone(),
+                conversations: harness_conversations,
+                chunks: harness_chunks,
+            });
+
+            if harness_conversations > 0 {
+                report.harnesses_synced.push(harness);
             }
         }
 

@@ -125,3 +125,21 @@ pub struct SyncReport {
     pub harnesses_synced: Vec<String>,
     pub harness_errors: HashMap<String, String>,
 }
+
+/// Progress events emitted by SessionIndex::sync_with_progress().
+/// Display logic lives in the CLI; the library only emits events.
+#[derive(Debug)]
+pub enum SyncEvent {
+    /// Harness data directory found; about to index `session_count` sessions.
+    HarnessStart { harness: String, session_count: usize },
+    /// Harness data directory not present on disk — skipped.
+    HarnessSkip { harness: String },
+    /// Conversation was already in the index — skipped.
+    ConversationSkip { harness: String, id: String },
+    /// Conversation was parsed, embedded, and stored.
+    ConversationIndexed { harness: String, id: String, chunks: usize },
+    /// All sessions for this harness have been processed.
+    HarnessDone { harness: String, conversations: usize, chunks: usize },
+    /// Non-fatal error for one session (sync continues with remaining sessions).
+    Error { harness: String, message: String },
+}
