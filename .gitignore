@@ -1,0 +1,18 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock        # library: keep unlocked (remove this line for the binary crate)
+
+# Python (PyO3 / maturin)
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+*.so
+
+# Local index / caches / artifacts
+*.db
+.agent-sessions/
+.DS_Store
