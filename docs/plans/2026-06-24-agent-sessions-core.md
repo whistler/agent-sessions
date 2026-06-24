@@ -6,7 +6,7 @@
 
 **Architecture:** Rust workspace with two crates — `core` (library) and `cli` (binary). `SessionIndex` is the public façade; `VectorStore`, `Embedder`, `Chunker`, and `HarnessConnector` are traits so each implementation is swappable. Vectors + locators only are persisted (no transcript text on disk).
 
-**Tech Stack:** Rust 2021, `rusqlite` (bundled SQLite), `fastembed` (local BGE embeddings, feature-gated), `regex`, `clap`, `serde_json`, `chrono`, `thiserror`.
+**Tech Stack:** Rust 2024, `rusqlite` (bundled SQLite), `fastembed` (local BGE embeddings, feature-gated), `text-splitter` (token-aware chunking), `regex`, `clap`, `serde_json`, `chrono`, `thiserror`.
 
 ---
 
@@ -172,9 +172,9 @@ git commit -m "fix(models): align Locator/Conversation/Message with design — n
 
 ---
 
-## Task 2: Fix Chunker trait + DefaultChunker
+## Task 2: Fix Chunker trait — use `text-splitter`
 
-The scaffold's `Chunker` takes `(Conversation, Vec<Message>)` and produces `Chunk` structs with embedded text — wrong on two counts. The trait should take raw text and return `Vec<String>` (text chunks only). The caller is responsible for building locators.
+The scaffold's `Chunker` takes `(Conversation, Vec<Message>)` — wrong interface. Rewrite to `chunk(text) -> Vec<String>` backed by the `text-splitter` crate (character-based by default; upgradeable to token-aware later with the `tiktoken-rs` feature). No hand-rolling needed.
 
 **Files:**
 - Modify: `crates/core/src/chunker.rs`
@@ -183,44 +183,31 @@ The scaffold's `Chunker` takes `(Conversation, Vec<Message>)` and produces `Chun
 
 ```rust
 // crates/core/src/chunker.rs
+use text_splitter::TextSplitter;
 
 pub trait Chunker: Send + Sync {
     /// Split text into chunks. Deterministic — same input always produces the same splits.
-    /// Short text (< max_chars) returns vec![text.to_string()].
+    /// Empty / whitespace-only text returns [].
     fn chunk(&self, text: &str) -> Vec<String>;
 }
 
-/// Splits on sentence boundaries with a 512-char soft limit and 64-char overlap.
+/// Character-based splitter, 512-char max, with overlap via text-splitter.
 pub struct DefaultChunker {
     max_chars: usize,
-    overlap: usize,
 }
 
 impl Default for DefaultChunker {
-    fn default() -> Self {
-        Self { max_chars: 512, overlap: 64 }
-    }
+    fn default() -> Self { Self { max_chars: 512 } }
 }
 
 impl Chunker for DefaultChunker {
     fn chunk(&self, text: &str) -> Vec<String> {
         let text = text.trim();
-        if text.len() <= self.max_chars {
-            return if text.is_empty() { vec![] } else { vec![text.to_string()] };
-        }
-        let mut chunks = Vec::new();
-        let mut start = 0;
-        while start < text.len() {
-            let end = (start + self.max_chars).min(text.len());
-            // extend to the next whitespace boundary
-            let end = text[end..].find(char::is_whitespace)
-                .map(|i| end + i)
-                .unwrap_or(end);
-            chunks.push(text[start..end].to_string());
-            if end >= text.len() { break; }
-            start = end.saturating_sub(self.overlap);
-        }
-        chunks
+        if text.is_empty() { return vec![]; }
+        TextSplitter::new(self.max_chars)
+            .chunks(text)
+            .map(str::to_string)
+            .collect()
     }
 }
 
@@ -242,12 +229,11 @@ mod tests {
 
     #[test]
     fn long_text_splits_into_multiple_chunks() {
-        let c = DefaultChunker { max_chars: 20, overlap: 5 };
+        let c = DefaultChunker { max_chars: 20 };
         let text = "word ".repeat(20); // 100 chars
         let chunks = c.chunk(&text);
         assert!(chunks.len() > 1);
-        // every chunk is <= max_chars (+ possible word extension)
-        for ch in &chunks { assert!(ch.len() <= 30); }
+        for ch in &chunks { assert!(ch.len() <= 25, "chunk too long: {}", ch.len()); }
     }
 }
 ```
@@ -264,7 +250,7 @@ Expected: `test result: ok. 3 passed`
 
 ```bash
 git add crates/core/src/chunker.rs
-git commit -m "fix(chunker): chunk(text)->Vec<String>, no Chunk struct dependency"
+git commit -m "fix(chunker): use text-splitter crate, chunk(text)->Vec<String>"
 ```
 
 ---
@@ -297,6 +283,7 @@ chrono.workspace = true
 rusqlite = { version = "0.31", features = ["bundled"] }
 regex = "1"
 walkdir = "2"
+text-splitter = "0.17"
 fastembed = { version = "4", optional = true }
 
 [features]

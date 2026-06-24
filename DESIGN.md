@@ -1,9 +1,8 @@
 # agent-sessions — Library Design
 
 *Working name: `agent-sessions` (import `agent_sessions`, CLI `agent-sessions`). Lock the name before first publish — see [Naming](#naming).*
-*2026-06-24 · scoped to the standalone open-source library (Dreamer Milestone 1).*
 
-**What it is:** a standalone, dependency-light, **local-first** library + CLI that discovers, normalizes, embeds, and searches your coding-agent sessions across harnesses (Claude, Codex, Cursor, OpenCode). It knows nothing about Dreamer's intelligence layer (Instructions, plans, grading). Dreamer is one consumer; the library stands on its own as "search my coding history."
+**What it is:** a standalone, dependency-light, **local-first** library + CLI that discovers, normalizes, embeds, and searches your coding-agent sessions across harnesses (Claude, Codex, Cursor, OpenCode). It stands entirely on its own as "search my coding history" — no external service, no intelligence layer baked in.
 
 **Prime directive — portability.** A single developer should be able to install it with one command, run it on macOS / Linux / Windows with zero config, and end up with **one portable index file** they can copy, back up, inspect, or delete. No server, no daemon required, no cloud.
 
@@ -28,18 +27,6 @@ idx.get_conversation(&id)?;                               // full, lazily read
 idx.read(&locator)?;                                      // lazy single-message text
 idx.harnesses()?;                                         // enabled · present · counts
 idx.register(Box::new(MyConnector));                      // third-party harness, no fork
-```
-
-The same surface, exposed to Python (PyO3 wheel) for Dreamer's intelligence layer:
-
-```python
-from agent_sessions import SessionIndex
-
-idx = SessionIndex()
-idx.sync()
-idx.search("read before editing")     # hybrid
-idx.grep(r"use pnpm")                  # keyword
-idx.similar("read before editing")    # vector
 ```
 
 ### Search: three verbs, one default
@@ -107,6 +94,23 @@ agent-sessions skill install                          # symlink SKILL.md into ag
 
 `--json` on every read command emits the same DTOs the library returns (one schema, defined once). The CLI owns config-file discovery and pretty-printing; the library takes explicit args and returns data.
 
+### CLI documentation for agents
+
+Coding agents are a primary consumer. The CLI is designed to be agent-readable:
+
+- Every command has a `--json` flag for machine-readable output (stable schema).
+- `agent-sessions --help` and `agent-sessions <cmd> --help` use clap's structured help — agents can read it directly.
+- `SKILL.md` at repo root: agent-facing usage doc (discovery patterns, search idioms, privacy guarantee). `agent-sessions skill install` symlinks it into `~/.claude/skills/`, `.cursor/skills/`, etc.
+- `llms.txt` + `llms-full.txt` at the repo root for LLM discoverability (spec at llmstxt.org).
+
+Example agent usage pattern:
+```bash
+# Sync then search — works in any coding agent shell
+agent-sessions sync
+agent-sessions search "how did I handle auth" --json | jq '.[0].snippet'
+agent-sessions grep "NEVER commit" --json
+```
+
 ---
 
 ## Configuration
@@ -160,42 +164,49 @@ The store is behind the `VectorStore` trait so the backend is a swap, not a rewr
 
 ## Language: Rust core, multi-language faces
 
-**Decision: a Rust core**, exposed through three faces from one codebase. This is driven by (1) the desktop app is **Tauri** (Rust shell) — a Rust library compiles straight in with no sidecar; (2) the heavy deps (`lance`, sqlite-vec via `rusqlite`, `fastembed`/`candle`) are Rust-native; (3) the library's logic is simple I/O + data transformation, which bounds Rust's cost; (4) it yields a single static CLI binary — the portability goal.
+**Decision: a Rust core**, exposed through two faces from one codebase. This is driven by (1) the desktop app is **Tauri** (Rust shell) — a Rust library compiles straight in with no sidecar; (2) the heavy deps (`lance`, sqlite-vec via `rusqlite`, `fastembed`/`candle`) are Rust-native; (3) the library's logic is simple I/O + data transformation, which bounds Rust's cost; (4) it yields a single static CLI binary — the portability goal.
 
-**One core, three faces:**
-- **Tauri desktop app** → `#[tauri::command]` wrappers, no IPC, no second runtime.
+**One core, two faces:**
+- **Tauri desktop app** → `#[tauri::command]` wrappers, no IPC, no second runtime. JS frontend calls `await invoke('search', { q })`.
 - **Standalone CLI** → native `clap` binary (single static file).
-- **Dreamer's Python intelligence layer** (LLM extraction/planning — genuinely nicer in Python) → **PyO3 + maturin** wheel, so `pip install agent-sessions` imports the Rust core directly. (Optional `napi-rs` face for Node if ever needed.)
 
 ```rust
-// Tauri command — frontend: await invoke('search', { q })
+// Tauri command — JS frontend: await invoke('search', { q })
 #[tauri::command]
 async fn search(state: State<'_, Index>, q: String) -> Result<Vec<Hit>, String> {
     state.search(&q).map_err(|e| e.to_string())
 }
-
-// PyO3 — Dreamer's Python imports the same core as a wheel
-#[pymethods]
-impl SessionIndex {
-    fn search(&self, q: &str) -> PyResult<Vec<Hit>> { Ok(self.inner.search(q)?) }
-}
 ```
 
-### Three-language tradeoff (for this library, given Tauri)
+### Three-language tradeoff (for this library, given Tauri + JS frontend)
 
 | | **Rust (chosen)** | Python | JS/TS |
 |---|---|---|---|
-| Tauri integration | ✅ compiles in as commands, one binary | ❌ sidecar: PyInstaller bundle + localhost HTTP + signing pain | ⚠️ webview/Node, compute blocks UI |
-| Distribution | single static binary (CLI) + signed app | bundled interpreter or user's Python (`uv tool` ok for CLI) | npm/npx, but desktop still needs the Rust shell |
+| Tauri integration | ✅ compiles in as commands, one binary | ❌ sidecar: PyInstaller bundle + localhost HTTP + signing pain | ⚠️ webview/Node, compute blocks UI thread |
+| Distribution | single static binary (CLI) + signed app | bundled interpreter (`uv tool` ok for CLI) | npm/npx, but desktop still needs the Rust shell |
 | Heavy deps | native: lance, rusqlite+sqlite-vec, fastembed/candle | mature wrappers around the same native libs | lancedb-node; transformers.js slow |
 | Local embedding perf | best (direct ONNX/Candle) | good (C extensions do the work) | weakest |
-| Importable by Dreamer's Python | yes, via PyO3 wheel | native | needs a bridge |
 | Dev speed | slowest (lifetimes, ONNX bundling) | fastest | fast |
 | Contributor pool | smaller | largest | large |
 
-**Why not Python:** viable only if you accept the Tauri **sidecar tax** — packaging the Starlette backend with PyInstaller into a per-platform executable, shipping a bundled interpreter (~tens of MB), localhost HTTP boundary, and macOS notarization friction. Fine if you're not shipping a desktop binary; a real cost once you are. **Why not JS/TS:** weakest for the compute-heavy core; keep it to frontend glue.
+**Why not Python:** the Tauri **sidecar tax** — PyInstaller bundle, localhost HTTP boundary, macOS notarization friction, ~tens of MB interpreter. Works fine for a pure CLI; prohibitive once a desktop binary is in scope. **Why not JS/TS:** weakest for compute-heavy core; keep it to frontend glue.
 
 **On Rust lifetimes (a real learning-curve cost):** lifetimes annotate how long a reference is valid so the compiler prevents use-after-free without a GC. They bite hardest in zero-copy, heavily-borrowed code. This library mostly sidesteps them by having types **own** their data (`String`, `Vec<f32>`) and cloning at boundaries — at this scale the clones are free relative to disk/embedding I/O. It's an unusually good first Rust project: simple domain logic, hard parts inside mature crates.
+
+### Key Rust crates
+
+| Concern | Crate | Notes |
+|---|---|---|
+| Chunking | [`text-splitter`](https://crates.io/crates/text-splitter) | char, token (tiktoken-rs / HF tokenizers), markdown, code-aware; zero hand-rolling |
+| Embedding (local) | [`fastembed`](https://crates.io/crates/fastembed) | Qdrant-maintained, wraps `ort`; BGE-small/base/large, multilingual-e5; lazy model download |
+| ONNX runtime | [`ort`](https://crates.io/crates/ort) | fastembed brings this; `load-dynamic` feature → shared `.dylib/.so/.dll` |
+| Vector store | [`rusqlite`](https://crates.io/crates/rusqlite) + [`sqlite-vec`](https://crates.io/crates/sqlite-vec) | bundled SQLite + C extension for exact KNN |
+| Embedder (pure-Rust escape hatch) | [`candle`](https://crates.io/crates/candle-core) | HuggingFace; removes native ONNX dep, single static binary |
+| CLI | [`clap`](https://crates.io/crates/clap) derive | auto `--help`, structured help, shell completions |
+| JSON | [`serde_json`](https://crates.io/crates/serde_json) | `--json` flag output |
+| Regex | [`regex`](https://crates.io/crates/regex) | `grep` verb |
+| Directory walk | [`walkdir`](https://crates.io/crates/walkdir) | harness discovery |
+| Error handling | [`thiserror`](https://crates.io/crates/thiserror) | typed errors; `anyhow` in CLI |
 
 ---
 
@@ -218,14 +229,14 @@ Use **`dist` (cargo-dist)** to generate the binaries, installer scripts, Homebre
 ### Install commands (best UX first)
 
 ```bash
-curl -fsSL https://agent-sessions.dev/install.sh | sh   # universal one-liner (primary)
-brew install <you>/tap/agent-sessions                   # mac/linux
+curl -fsSL https://github.com/whistler/agent-sessions/releases/latest/download/install.sh | sh
+brew install whistler/tap/agent-sessions                # mac/linux (cargo-dist Homebrew formula)
 winget install agent-sessions                           # Windows (or: scoop install …)
 cargo binstall agent-sessions                           # cargo users, prebuilt
 cargo install agent-sessions                            # fallback: from source (needs toolchain)
 ```
 
-The curl/powershell installer is the headline — detects platform+arch, pulls the right prebuilt, puts it on PATH, no toolchain. `cargo install` is the from-source fallback, not the headline. The Python consumer is the separate `pip install agent-sessions` / `uv add agent-sessions` path (the onnxruntime wheel rides along as a normal dependency there).
+The curl/powershell installer is the headline — generated by `dist` (cargo-dist), hosted on GitHub Releases alongside the binaries, detects platform+arch, pulls the right prebuilt, puts it on PATH, no toolchain required. `cargo install` is the from-source fallback, not the primary path.
 
 ### Install is light; provisioning is lazy + explicit
 
@@ -249,7 +260,7 @@ Model weights are always a download-once shared cache — never bundled, never d
 Sync is incremental and idempotent, so the portable mechanism is **a scheduled invocation of `agent-sessions sync`, not a bespoke daemon.** Three tiers:
 
 1. **Manual** — `agent-sessions sync`. Default.
-2. **Foreground watcher** — `sync --watch`: long-lived process re-syncing on an interval (later: filesystem events). `dreamer serve` can run this loop in-process.
+2. **Foreground watcher** — `sync --watch`: long-lived process re-syncing on an interval (later: filesystem events). Any host process can run this loop in-process via the library API.
 3. **OS scheduler (set-and-forget, fully portable)** — `schedule enable [--interval 30m]` installs the native unit: macOS `launchd` LaunchAgent · Linux `systemd --user` timer (fallback cron) · Windows Scheduled Task. `schedule disable` removes it.
 
 Enable via `[sync] auto = true` + `schedule enable`, or just `--watch`. Optional lazy **sync-on-read** (config-gated, off by default): if the last sync is older than `interval`, `search`/`ls` trigger a quick incremental sync first.
@@ -266,7 +277,7 @@ Enable via `[sync] auto = true` + `schedule enable`, or just `--watch`. Optional
 
 ## License
 
-**MIT.** This isn't patent-worthy, and MIT's `AS IS` **warranty disclaimer + limitation of liability** is exactly the protection wanted if the library causes downstream damage — it shields the author from user claims (standard, generally upheld; not absolute, e.g. gross negligence; not legal advice). MIT lacks an explicit patent grant (Apache-2.0's main addition), judged unnecessary here. The commercial moat lives in the **Dreamer product**, not this library — keep the library permissive to maximize adoption (it's Dreamer's funnel).
+**MIT.** This isn't patent-worthy, and MIT's `AS IS` **warranty disclaimer + limitation of liability** is exactly the protection wanted if the library causes downstream damage — it shields the author from user claims (standard, generally upheld; not absolute, e.g. gross negligence; not legal advice). MIT lacks an explicit patent grant (Apache-2.0's main addition), judged unnecessary here. Keeping the library permissive maximizes adoption — commercial value lives in products built on top.
 
 ---
 
