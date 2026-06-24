@@ -1,8 +1,8 @@
 //! LanceDB-backed vector store. Enabled with the `lancedb` cargo feature.
 
+use crate::Result;
 use crate::models::Conversation;
 use crate::store::{ChunkVector, Filter, Meta, StoredChunk, VectorStore};
-use crate::Result;
 
 /// LanceDB backed vector store (feature-gated).
 pub struct LanceDbStore {
@@ -38,7 +38,12 @@ impl VectorStore for LanceDbStore {
         todo!("LanceDbStore::get_conversation")
     }
 
-    fn vector_search(&self, _vec: &[f32], _limit: usize, _filter: &Filter) -> Result<Vec<StoredChunk>> {
+    fn vector_search(
+        &self,
+        _vec: &[f32],
+        _limit: usize,
+        _filter: &Filter,
+    ) -> Result<Vec<StoredChunk>> {
         todo!("LanceDbStore::vector_search")
     }
 

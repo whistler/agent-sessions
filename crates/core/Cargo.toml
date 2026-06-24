@@ -16,9 +16,15 @@ thiserror.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 rusqlite = { version = "0.31", features = ["bundled"] }
-sqlite-vec = "0.1"
+regex = "1"
+walkdir = "2"
+text-splitter = "0.17"
+fastembed = { version = "5", optional = true }
 
 [features]
 default = ["local-embed"]
-local-embed = []
+local-embed = ["dep:fastembed"]
 lancedb = []
+
+[dev-dependencies]
+tempfile = "3"

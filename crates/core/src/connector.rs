@@ -1,5 +1,5 @@
-use crate::models::{Conversation, ConversationRef, Locator, Message};
 use crate::Result;
+use crate::models::{Conversation, ConversationRef, Locator, Message};
 
 pub trait HarnessConnector: Send + Sync {
     fn id(&self) -> &str;

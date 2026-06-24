@@ -1,5 +1,5 @@
-use crate::models::{Conversation, Harness, Locator, Role};
 use crate::Result;
+use crate::models::{Conversation, Harness, Locator, Role};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -60,6 +60,7 @@ pub trait VectorStore: Send + Sync {
     fn has_conversation(&self, id: &str) -> Result<bool>;
     fn list_conversations(&self, filter: &Filter) -> Result<Vec<Conversation>>;
     fn get_conversation(&self, id: &str) -> Result<Option<Conversation>>;
-    fn vector_search(&self, vec: &[f32], limit: usize, filter: &Filter) -> Result<Vec<StoredChunk>>;
+    fn vector_search(&self, vec: &[f32], limit: usize, filter: &Filter)
+    -> Result<Vec<StoredChunk>>;
     fn meta(&self) -> Result<Meta>;
 }

@@ -745,10 +745,12 @@ git commit -m "feat(store): SqliteVecStore with cosine search — no text on dis
 
 ## Task 5: FastEmbedder
 
+`HashEmbedder` is a bag-of-words projection and stays as an explicit **test fake** — it is NOT a production fallback. `default_embedder()` fails loudly if the model can't init. This prevents the silent degradation where `similar()` and the vector leg of `search()` become redundant with keyword search.
+
 **Files:**
 - Modify: `crates/core/src/embedder.rs`
 
-- [ ] **Step 1: Add FastEmbedder**
+- [ ] **Step 1: Replace embedder.rs**
 
 ```rust
 // crates/core/src/embedder.rs
@@ -756,71 +758,81 @@ use crate::Result;
 
 pub trait Embedder: Send + Sync {
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
-    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
     fn dimensions(&self) -> usize;
-    fn model_id(&self) -> &str;
 }
 
-/// Zero-vector stub — for tests without a real model.
-pub struct NullEmbedder {
-    dim: usize,
+/// Bag-of-words test fake. Each token hashes to a vector dimension (L2-normalized).
+/// Not semantic — "read the file" and "check the document" score zero similarity.
+/// Use explicitly in tests via SessionIndex::from_parts(). NEVER use as a production
+/// fallback: similar() and the vector leg of search() become meaningless.
+pub struct HashEmbedder { dimensions: usize }
+
+impl HashEmbedder {
+    pub fn new(dimensions: usize) -> Self { Self { dimensions } }
 }
 
-impl NullEmbedder {
-    pub fn new(dim: usize) -> Self { Self { dim } }
-}
-
-impl Embedder for NullEmbedder {
-    fn embed(&self, _: &str) -> Result<Vec<f32>> { Ok(vec![0.0; self.dim]) }
-    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        Ok(texts.iter().map(|_| vec![0.0; self.dim]).collect())
+impl Embedder for HashEmbedder {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut v = vec![0.0f32; self.dimensions];
+        for token in text.split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()) {
+            let mut h = DefaultHasher::new();
+            token.to_lowercase().hash(&mut h);
+            v[(h.finish() as usize) % self.dimensions] += 1.0;
+        }
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 { for x in &mut v { *x /= norm; } }
+        Ok(v)
     }
-    fn dimensions(&self) -> usize { self.dim }
-    fn model_id(&self) -> &str { "null" }
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        texts.iter().map(|t| self.embed(t)).collect()
+    }
+    fn dimensions(&self) -> usize { self.dimensions }
 }
 
 #[cfg(feature = "local-embed")]
 pub struct FastEmbedder {
-    model: fastembed::TextEmbedding,
-    dim: usize,
+    model: std::sync::Mutex<fastembed::TextEmbedding>,
+    dimensions: usize,
 }
 
 #[cfg(feature = "local-embed")]
 impl FastEmbedder {
     pub fn new() -> Result<Self> {
-        use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+        use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::BGESmallENV15)
+            TextInitOptions::new(EmbeddingModel::AllMiniLML6V2)
                 .with_show_download_progress(true),
-        )
-        .map_err(|e| crate::AgentSessionsError::Embedder(e.to_string()))?;
-        Ok(Self { model, dim: 384 })
+        ).map_err(|e| crate::AgentSessionsError::Embedder(e.to_string()))?;
+        Ok(Self { model: std::sync::Mutex::new(model), dimensions: 384 })
     }
 }
 
 #[cfg(feature = "local-embed")]
 impl Embedder for FastEmbedder {
     fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let mut batch = self.embed_batch(&[text.to_string()])?;
-        Ok(batch.pop().unwrap_or_default())
+        self.embed_batch(&[text]).map(|mut v| v.pop().unwrap_or_default())
     }
-
-    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        self.model
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        self.model.lock().unwrap()
             .embed(texts.to_vec(), None)
             .map_err(|e| crate::AgentSessionsError::Embedder(e.to_string()))
     }
-
-    fn dimensions(&self) -> usize { self.dim }
-
-    fn model_id(&self) -> &str { "BAAI/bge-small-en-v1.5" }
+    fn dimensions(&self) -> usize { self.dimensions }
 }
 
-// Re-export the right default for the current feature set
-#[cfg(feature = "local-embed")]
-pub type DefaultEmbedder = FastEmbedder;
-#[cfg(not(feature = "local-embed"))]
-pub type DefaultEmbedder = NullEmbedder;
+/// Load the production embedder. Fails loudly — no silent non-semantic fallback.
+pub fn default_embedder() -> Result<Box<dyn Embedder>> {
+    #[cfg(feature = "local-embed")]
+    return Ok(Box::new(FastEmbedder::new()?));
+
+    #[cfg(not(feature = "local-embed"))]
+    Err(crate::AgentSessionsError::Embedder(
+        "build with feature=\"local-embed\" or supply an embedder via SessionIndex::from_parts".into()
+    ))
+}
 ```
 
 - [ ] **Step 2: Verify compilation**
@@ -835,7 +847,7 @@ Expected: no errors (fastembed download may print progress on first compile).
 
 ```bash
 git add crates/core/src/embedder.rs
-git commit -m "feat(embedder): FastEmbedder with fastembed/BGE-small, NullEmbedder for tests"
+git commit -m "feat(embedder): FastEmbedder with fastembed/BGE-small, HashEmbedder for tests"
 ```
 
 ---
@@ -1710,7 +1722,7 @@ fn sync_indexes_claude_sessions(tmp: ()) {
     let connector = ClaudeConnector::new(fixture("claude"));
     let mut idx = agent_sessions::SessionIndex::with_parts(
         Box::new(agent_sessions::store::sqlite_vec::SqliteVecStore::open(&db_path).unwrap()),
-        Box::new(agent_sessions::embedder::NullEmbedder::new(3)),
+        Box::new(agent_sessions::embedder::HashEmbedder::new(3)),
         Box::new(agent_sessions::chunker::DefaultChunker::default()),
         vec![Box::new(connector)],
     );
@@ -1727,7 +1739,7 @@ fn sync_is_incremental() {
     let connector = ClaudeConnector::new(fixture("claude"));
     let mut idx = agent_sessions::SessionIndex::with_parts(
         Box::new(agent_sessions::store::sqlite_vec::SqliteVecStore::open(&db_path).unwrap()),
-        Box::new(agent_sessions::embedder::NullEmbedder::new(3)),
+        Box::new(agent_sessions::embedder::HashEmbedder::new(3)),
         Box::new(agent_sessions::chunker::DefaultChunker::default()),
         vec![Box::new(connector)],
     );
@@ -1770,7 +1782,7 @@ impl SessionIndex {
         #[cfg(feature = "local-embed")]
         let embedder: Box<dyn embedder::Embedder> = Box::new(embedder::FastEmbedder::new()?);
         #[cfg(not(feature = "local-embed"))]
-        let embedder: Box<dyn embedder::Embedder> = Box::new(embedder::NullEmbedder::new(384));
+        let embedder: Box<dyn embedder::Embedder> = Box::new(embedder::HashEmbedder::new(384));
 
         let chunker = Box::new(chunker::DefaultChunker::default());
         let home = dirs_next::home_dir().unwrap_or_default();
@@ -1909,7 +1921,7 @@ fn synced_index(fixture_path: &str) -> (agent_sessions::SessionIndex, tempfile::
     let db = tmp.path().join("index.db");
     let mut idx = agent_sessions::SessionIndex::with_parts(
         Box::new(agent_sessions::store::sqlite_vec::SqliteVecStore::open(&db).unwrap()),
-        Box::new(agent_sessions::embedder::NullEmbedder::new(384)),
+        Box::new(agent_sessions::embedder::HashEmbedder::new(384)),
         Box::new(agent_sessions::chunker::DefaultChunker::default()),
         vec![Box::new(ClaudeConnector::new(fixture(fixture_path)))],
     );
@@ -2259,7 +2271,7 @@ fn no_text_on_disk_after_sync() {
         use agent_sessions::connectors::claude::ClaudeConnector;
         let mut idx = agent_sessions::SessionIndex::with_parts(
             Box::new(agent_sessions::store::sqlite_vec::SqliteVecStore::open(&db_path).unwrap()),
-            Box::new(agent_sessions::embedder::NullEmbedder::new(384)),
+            Box::new(agent_sessions::embedder::HashEmbedder::new(384)),
             Box::new(agent_sessions::chunker::DefaultChunker::default()),
             vec![Box::new(ClaudeConnector::new(fixture("claude")))],
         );
@@ -2327,7 +2339,7 @@ git push origin main
 | AT-READ-1 (lazy read) | Task 6 `claude_reads_message_text_lazily` | ✅ |
 | AT-READ-2 (broken locator) | NotFound error returned | ✅ |
 | AT-PRIV-1 (no text on disk) | Task 13 `no_text_on_disk_after_sync` | ✅ |
-| AT-PRIV-2 (no network) | NullEmbedder in tests; FastEmbedder download is one-time | ✅ |
+| AT-PRIV-2 (no network) | HashEmbedder in tests; FastEmbedder download is one-time | ✅ |
 | AT-EMB-1 (mismatch error) | EmbedderMismatchError in store (Python proto) — **not yet ported** | ❌ add to SqliteVecStore.migrate: store embedder_id in meta, check on open |
 | AT-STORE-1 (single file) | sqlite-vec backend is one .db file | ✅ |
 | AT-CFG-1/2 (harness control) | connectors list in open() | Partial (no TOML config yet) |

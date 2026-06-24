@@ -1,6 +1,7 @@
+use super::shared::{default_home_dir, discover_jsonl, parse_jsonl_session, read_message_text};
+use crate::Result;
 use crate::connector::HarnessConnector;
 use crate::models::{Conversation, ConversationRef, Locator, Message};
-use crate::Result;
 
 /// Reads OpenAI Codex / codex-cli session transcripts.
 pub struct CodexConnector {
@@ -10,6 +11,10 @@ pub struct CodexConnector {
 impl CodexConnector {
     pub fn new(sessions_dir: std::path::PathBuf) -> Self {
         Self { sessions_dir }
+    }
+
+    pub fn default_sessions_dir() -> std::path::PathBuf {
+        default_home_dir(&[".codex", "sessions"])
     }
 }
 
@@ -22,15 +27,15 @@ impl HarnessConnector for CodexConnector {
         self.sessions_dir.exists()
     }
 
-    fn discover(&self, _since: Option<std::time::SystemTime>) -> Result<Vec<ConversationRef>> {
-        todo!("CodexConnector::discover")
+    fn discover(&self, since: Option<std::time::SystemTime>) -> Result<Vec<ConversationRef>> {
+        discover_jsonl(&self.sessions_dir, self.id(), since)
     }
 
-    fn parse(&self, _r: &ConversationRef) -> Result<(Conversation, Vec<Message>)> {
-        todo!("CodexConnector::parse")
+    fn parse(&self, r: &ConversationRef) -> Result<(Conversation, Vec<Message>)> {
+        parse_jsonl_session(r, crate::models::Harness::Codex)
     }
 
-    fn read(&self, _locator: &Locator) -> Result<String> {
-        todo!("CodexConnector::read")
+    fn read(&self, locator: &Locator) -> Result<String> {
+        read_message_text(locator)
     }
 }

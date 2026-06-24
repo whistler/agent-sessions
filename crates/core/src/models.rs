@@ -1,16 +1,8 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Role {
-    User,
-    Assistant,
-    System,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Harness {
     Claude,
     Codex,
@@ -19,83 +11,117 @@ pub enum Harness {
     Custom(String),
 }
 
-/// Points to a specific location within a conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Locator {
-    pub conversation_id: String,
-    pub message_index: Option<usize>,
-    pub chunk_index: Option<usize>,
+impl Harness {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Harness::Claude => "claude",
+            Harness::Codex => "codex",
+            Harness::Cursor => "cursor",
+            Harness::OpenCode => "opencode",
+            Harness::Custom(value) => value.as_str(),
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "claude" => Harness::Claude,
+            "codex" => Harness::Codex,
+            "cursor" => Harness::Cursor,
+            "opencode" => Harness::OpenCode,
+            other => Harness::Custom(other.to_string()),
+        }
+    }
 }
 
-/// A single conversation session.
+impl Serialize for Harness {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Harness {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Harness::from_str(&value))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    User,
+    Assistant,
+    System,
+}
+
+/// Stable pointer into a source file. Enough for any connector to lazy-read the text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Locator {
+    pub conversation_id: String,
+    pub message_ordinal: usize,
+    pub chunk_ordinal: usize,
+    pub source_path: String,
+    pub harness: String,
+}
+
+/// One session, harness-agnostic. Text-free - metadata only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: String,
     pub harness: Harness,
+    pub harness_version: Option<String>,
     pub project_path: Option<String>,
-    pub model: Option<String>,
-    pub started_at: DateTime<Utc>,
-    pub ended_at: Option<DateTime<Utc>>,
-    pub message_count: usize,
+    pub repo_url: Option<String>,
+    pub git_branch: Option<String>,
     pub title: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub source_path: String,
+    pub message_count: usize,
 }
 
-/// A single message within a conversation.
+/// Message metadata only - text is read lazily via connector.read(locator).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
-    pub id: String,
-    pub conversation_id: String,
-    pub role: Role,
-    pub content: String,
-    pub timestamp: DateTime<Utc>,
-    pub index: usize,
-}
-
-/// A text chunk derived from a message, used for embedding and search.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Chunk {
     pub locator: Locator,
-    pub text: String,
     pub role: Role,
-    pub harness: Harness,
-    pub project_path: Option<String>,
     pub model: Option<String>,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Option<DateTime<Utc>>,
 }
 
-/// A search result from vector similarity search.
+/// Lightweight reference returned by discover(), before full parse.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationRef {
+    pub id: String,
+    pub source_path: std::path::PathBuf,
+    pub modified_at: std::time::SystemTime,
+}
+
+/// Result of a vector or hybrid search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
     pub locator: Locator,
     pub score: f32,
     pub snippet: String,
-    pub conversation: Conversation,
 }
 
-/// A search result from regex/grep search.
+/// Result of a regex search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrepHit {
     pub locator: Locator,
-    pub line: String,
-    pub line_number: usize,
-    pub conversation: Conversation,
+    pub snippet: String,
 }
 
-/// Summary report from a sync operation.
+/// Summary returned by sync().
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncReport {
-    pub conversations_added: usize,
-    pub conversations_skipped: usize,
-    pub chunks_indexed: usize,
-    pub errors: Vec<String>,
-    pub duration_ms: u64,
-}
-
-/// A lightweight reference to a conversation for discovery.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConversationRef {
-    pub id: String,
-    pub harness: Harness,
-    pub path: std::path::PathBuf,
-    pub modified_at: std::time::SystemTime,
+    pub conversations_indexed: usize,
+    pub chunks_added: usize,
+    pub harnesses_synced: Vec<String>,
+    pub harness_errors: HashMap<String, String>,
 }
