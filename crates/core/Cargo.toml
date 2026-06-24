@@ -1,0 +1,24 @@
+[package]
+name = "agent-sessions"
+description = "Search your local coding-agent sessions by meaning or regex"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["ai", "agents", "search", "embeddings", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+rusqlite = { version = "0.31", features = ["bundled"] }
+sqlite-vec = "0.1"
+
+[features]
+default = ["local-embed"]
+local-embed = []
+lancedb = []

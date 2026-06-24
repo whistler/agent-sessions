@@ -1,0 +1,16 @@
+[package]
+name = "agent-sessions-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "agent-sessions"
+path = "src/main.rs"
+
+[dependencies]
+agent-sessions = { path = "../core" }
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+serde_json.workspace = true
